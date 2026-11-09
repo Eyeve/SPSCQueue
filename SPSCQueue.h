@@ -45,15 +45,15 @@ public:
 
 	/* non-copyable and non-movable */
 	SPSCQueue(const SPSCQueue &) = delete;
-
+	// SPSCQueue(SPSCQueue &&) = default;
 	SPSCQueue &operator=(const SPSCQueue &) = delete;
+	// SPSCQueue &operator=(SPSCQueue &&) = default;
+
 
 	/* producer thread only */
 	template<typename... Args>
 	EYE_NODISCARD bool TryEmplace(Args &&... args);
-
 	EYE_NODISCARD bool TryPush(const T &value);
-
 	EYE_NODISCARD bool TryPush(T &&value);
 
 	// EYE_NODISCARD size_type TryPushN(const T *src, size_type n);
@@ -65,24 +65,20 @@ public:
 
 	/* info */
 	EYE_NODISCARD static constexpr size_type GetCapacity() noexcept;
-
 	EYE_NODISCARD size_type GetApproxSize() const noexcept;
 
 private:
 	pointer data_;
-
 	struct WriterSide
 	{
 		std::atomic< size_type > writeIdx{ 0ULL };
 		size_type readCacheIdx{ 0ULL };
 	} writer_;
-
 	struct ReaderSide
 	{
 		std::atomic< size_type > readIdx{ 0ULL };
 		size_type writeCacheIdx{ 0ULL };
 	} reader_;
-
 	Allocator allocator_;
 };
 
@@ -150,7 +146,7 @@ bool SPSCQueue< T, Capacity, Allocator >::TryPop(T& out)
 	}
 
 	T &temp = data_[readIdx & kMask];
-	out = temp;
+	out = std::move(temp);
 	alloc_traits::destroy(allocator_, &temp);
 	reader_.readIdx.store(readIdx + 1, std::memory_order_release);
 	return true;
