@@ -2,6 +2,17 @@
 
 #include "helpers.h"
 
+TEST(basic, approx_size)
+{
+	SPSCQueue<int, 8> queue;
+	ASSERT_TRUE(queue.TryPush(2));
+	ASSERT_TRUE(queue.TryPush(2));
+	ASSERT_TRUE(queue.TryPush(2));
+	int out;
+	ASSERT_TRUE(queue.TryPop(out));
+	ASSERT_EQ(queue.GetApproxSize(), 2);
+}
+
 TEST(basic, push_pop)
 {
 	SPSCQueue<int, 16> queue;

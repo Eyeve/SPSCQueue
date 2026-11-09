@@ -1,62 +1,88 @@
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <bit>
 #include <memory>
+
+#if defined(__has_cpp_attribute) && __has_cpp_attribute(nodiscard)
+#define EYE_NODISCARD [[nodiscard]]
+#else
+#define EYE_NODISCARD
+#endif
 
 // ------------------------------------------
 // START OF SPCS-QUEUE INTERFACE
 // ------------------------------------------
 
-template<typename T, std::size_t Capacity, typename Allocator = std::allocator<T>>
+template<typename T, std::size_t Capacity, typename Allocator = std::allocator< T > >
 class SPSCQueue
 {
+	using alloc_type = Allocator;
+	using alloc_traits = std::allocator_traits< Allocator >;
+
 public:
-	// using value_type = T;
-	// using reference = T&;
-	// using const_reference = const T&;
-	// using difference_type = std::ptrdiff_t;
+	using value_type = T;
+	using pointer = alloc_traits::pointer;
+	using const_pointer = alloc_traits::const_pointer;
+	using reference = T &;
+	using const_reference = const T &;
+	using difference_type = std::ptrdiff_t;
 	using size_type = std::size_t;
 
 private:
-    static_assert(std::has_single_bit(Capacity), "Capacity must be a power of two");
+	static_assert(std::has_single_bit(Capacity), "Capacity must be a power of two");
 	static constexpr std::size_t kMask = Capacity - 1;
-	// static constexpr std::size_t kCacheLineSize = 64;
+#ifdef __cpp_lib_hardware_interference_size
+	static constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
+#else
+	static constexpr size_t kCacheLineSize = 64;
+#endif
 
 public:
-    explicit SPSCQueue(const Allocator& allocator = Allocator());
+	explicit SPSCQueue(const Allocator &allocator = Allocator());
+
 	~SPSCQueue();
 
-    /* non-copyable and non-movable */
-    SPSCQueue(const SPSCQueue&) = delete;
-    SPSCQueue& operator=(const SPSCQueue&) = delete;
+	/* non-copyable and non-movable */
+	SPSCQueue(const SPSCQueue &) = delete;
 
-    /* producer thread only */
-    [[nodiscard]] bool TryPush(const T& value);
-    // [[nodiscard]] bool try_push(T&& value);
-    // [[nodiscard]] std::size_t try_push_n(const T *src, std::size_t n);
+	SPSCQueue &operator=(const SPSCQueue &) = delete;
 
-    /* consumer thread only */
-    [[nodiscard]] bool TryPop(T& out);
-    // [[nodiscard]] std::size_t try_pop_n(T *dst, std::size_t n);
+	/* producer thread only */
+	template<typename... Args>
+	EYE_NODISCARD bool TryEmplace(Args &&... args);
 
-    /* info */
-    [[nodiscard]] static constexpr size_type GetCapacity() noexcept;
-    // [[nodiscard]] std::size_t size_approx() const noexcept;
+	EYE_NODISCARD bool TryPush(const T &value);
+
+	EYE_NODISCARD bool TryPush(T &&value);
+
+	// EYE_NODISCARD size_type TryPushN(const T *src, size_type n);
+
+	/* consumer thread only */
+	EYE_NODISCARD bool TryPop(T &out);
+
+	// EYE_NODISCARD size_type TryPopN(T *dst, size_type n);
+
+	/* info */
+	EYE_NODISCARD static constexpr size_type GetCapacity() noexcept;
+
+	EYE_NODISCARD size_type GetApproxSize() const noexcept;
 
 private:
-    T* data_;
+	pointer data_;
+
 	struct WriterSide
 	{
-		std::atomic<size_type> writeIdx{0ULL};
-		size_type readCacheIdx{0ULL};
+		std::atomic< size_type > writeIdx{ 0ULL };
+		size_type readCacheIdx{ 0ULL };
 	} writer_;
+
 	struct ReaderSide
 	{
-		std::atomic<size_type> readIdx{0ULL};
-		size_type writeCacheIdx{0ULL};
+		std::atomic< size_type > readIdx{ 0ULL };
+		size_type writeCacheIdx{ 0ULL };
 	} reader_;
+
 	Allocator allocator_;
 };
 
@@ -65,20 +91,27 @@ private:
 // ------------------------------------------
 
 template<typename T, std::size_t Capacity, typename Allocator>
-SPSCQueue<T, Capacity, Allocator>::SPSCQueue(const Allocator& allocator)
-    : allocator_(allocator)
+SPSCQueue< T, Capacity, Allocator >::SPSCQueue(const Allocator &allocator)
+	: allocator_(allocator)
 {
-	data_ = std::allocator_traits<Allocator>::allocate(allocator_, Capacity);
+	data_ = std::allocator_traits< Allocator >::allocate(allocator_, Capacity);
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
 SPSCQueue< T, Capacity, Allocator >::~SPSCQueue()
 {
-	std::allocator_traits<Allocator>::deallocate(allocator_, data_, Capacity);
+	const size_type readIdx = reader_.readIdx.load(std::memory_order_relaxed);
+	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_relaxed);
+
+	for (size_type i = readIdx; i < writeIdx; ++i)
+		alloc_traits::destroy(allocator_, &data_[i & kMask]);
+
+	std::allocator_traits< Allocator >::deallocate(allocator_, data_, Capacity);
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue<T, Capacity, Allocator>::TryPush(const T& value)
+template<typename... Args>
+bool SPSCQueue< T, Capacity, Allocator >::TryEmplace(Args &&... args)
 {
 	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_relaxed);
 	if (writeIdx - writer_.readCacheIdx == Capacity)
@@ -88,13 +121,25 @@ bool SPSCQueue<T, Capacity, Allocator>::TryPush(const T& value)
 			return false;
 	}
 
-	new (&data_[writeIdx & kMask]) T(value);
+	alloc_traits::construct(allocator_, &data_[writeIdx & kMask], std::forward< Args >(args)...);
 	writer_.writeIdx.store(writeIdx + 1, std::memory_order_release);
 	return true;
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue<T, Capacity, Allocator>::TryPop(T& out)
+bool SPSCQueue< T, Capacity, Allocator >::TryPush(const T &value)
+{
+	return TryEmplace(value);
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+bool SPSCQueue< T, Capacity, Allocator >::TryPush(T &&value)
+{
+	return TryEmplace(std::forward< T >(value));
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+bool SPSCQueue< T, Capacity, Allocator >::TryPop(T& out)
 {
 	const size_type readIdx = reader_.readIdx.load(std::memory_order_relaxed);
 	if (readIdx == reader_.writeCacheIdx)
@@ -104,15 +149,23 @@ bool SPSCQueue<T, Capacity, Allocator>::TryPop(T& out)
 			return false;
 	}
 
-	T& temp = data_[readIdx & kMask];
+	T &temp = data_[readIdx & kMask];
 	out = temp;
-	temp.~T();
+	alloc_traits::destroy(allocator_, &temp);
 	reader_.readIdx.store(readIdx + 1, std::memory_order_release);
 	return true;
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-constexpr auto SPSCQueue<T, Capacity, Allocator>::GetCapacity() noexcept -> size_type
+constexpr auto SPSCQueue< T, Capacity, Allocator >::GetCapacity() noexcept -> size_type
 {
 	return Capacity;
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::GetApproxSize() const noexcept -> size_type
+{
+	const size_type readIdx = reader_.readIdx.load(std::memory_order_acquire);
+	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_acquire);
+	return writeIdx - readIdx;
 }
