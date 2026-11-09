@@ -133,7 +133,7 @@ constexpr std::size_t kCap = 1024;
 
 static void Cfg(benchmark::internal::Benchmark* b)
 {
-	b->Repetitions(3)                 // 30 независимых прогонов
+	b->Repetitions(30)                 // 30 независимых прогонов
 	 ->MinWarmUpTime(1.0)             // прогрев 1 с перед каждым прогоном
 	 // ->MinTime(2.0)                   // каждый прогон минимум 2 с
 	 ->ReportAggregatesOnly(true);    // в файл/консоль только агрегаты
@@ -153,14 +153,14 @@ static void Cfg(benchmark::internal::Benchmark* b)
 	BENCHMARK_TEMPLATE(BM_PushPop_SingleThread, F, T, kCap) \
 		->Setup([](const benchmark::State&) { Shared<F, T, kCap>::q = F<T, kCap>::Create(); }) \
 		->Teardown([](const benchmark::State&) { Shared<F, T, kCap>::q.reset(); }) \
-		// ->Apply(Cfg)
+		->Apply(Cfg)
 
-REG_1T(QueueFactory,   U64);
-REG_1T(QueueFactory,   P1);
-REG_1T(QueueFactory,   P4);
-REG_1T(QueueExFactory, U64);
-REG_1T(QueueExFactory, P1);
-REG_1T(QueueExFactory, P4);
+// REG_1T(QueueFactory,   U64);
+// REG_1T(QueueFactory,   P1);
+// REG_1T(QueueFactory,   P4);
+// REG_1T(QueueExFactory, U64);
+// REG_1T(QueueExFactory, P1);
+// REG_1T(QueueExFactory, P4);
 
 // ---- two threads (producer + consumer) ----
 #define REG_2T(F, T) \
@@ -169,7 +169,7 @@ REG_1T(QueueExFactory, P4);
 		->UseRealTime() \
 		->Setup([](const benchmark::State&) { Shared<F, T, kCap>::q = F<T, kCap>::Create(); }) \
 		->Teardown([](const benchmark::State&) { Shared<F, T, kCap>::q.reset(); }) \
-		// ->Apply(Cfg)
+		->Apply(Cfg)
 
 REG_2T(QueueFactory,   U64);
 REG_2T(QueueFactory,   P1);

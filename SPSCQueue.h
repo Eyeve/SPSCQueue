@@ -3,11 +3,20 @@
 #include <atomic>
 #include <bit>
 #include <memory>
+#include <cstring>
 
 #if defined(__has_cpp_attribute) && __has_cpp_attribute(nodiscard)
 #define EYE_NODISCARD [[nodiscard]]
 #else
 #define EYE_NODISCARD
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define EYE_ALWAYS_INLINE [[gnu::always_inline]] inline
+#elif defined(_MSC_VER)
+#define EYE_ALWAYS_INLINE __forceinline
+#else
+#define EYE_ALWAYS_INLINE inline
 #endif
 
 // ------------------------------------------
@@ -18,35 +27,41 @@ template<typename T, std::size_t Capacity, typename Allocator = std::allocator< 
 class SPSCQueue
 {
 	using alloc_type = Allocator;
-	using alloc_traits = std::allocator_traits< Allocator >;
+	using alloc_traits = std::allocator_traits< alloc_type >;
 
 public:
 	using value_type = T;
-	using pointer = alloc_traits::pointer;
-	using const_pointer = alloc_traits::const_pointer;
+	using pointer = T*;
+	using const_pointer = const T*;
 	using reference = T&;
 	using const_reference = const T&;
 	using difference_type = std::ptrdiff_t;
 	using size_type = std::size_t;
 
 private:
-	static_assert(std::has_single_bit(Capacity), "Capacity must be a power of two");
-	static constexpr std::size_t kMask = Capacity - 1;
+	static_assert(std::has_single_bit(Capacity), "Capacity must be power of two");
+	static_assert(std::is_nothrow_destructible_v< T >, "T must be nothrow destructible");
+	static constexpr size_type kMask = Capacity - 1;
+	// TODO: maybe find another way to get cache line size
 #ifdef __cpp_lib_hardware_interference_size
-	static constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
+	static constexpr size_type kCacheLineSize = std::hardware_destructive_interference_size;
 #else
-	static constexpr size_t kCacheLineSize = 64;
+	static constexpr size_type kCacheLineSize = 64;
 #endif
+	/*
+	 * The allocator does not guarantee data alignment,
+	 * so need to use padding on both sides of the buffer
+	 */
+	static constexpr size_type kPadding = (kCacheLineSize - 1) / sizeof(T) + 1;
+	static constexpr size_type kBaseCapacity = Capacity + kPadding * 2;
 
 public:
-	explicit SPSCQueue(const Allocator &allocator = Allocator());
-
+	explicit SPSCQueue(bool touch = true, const Allocator &allocator = Allocator());
 	~SPSCQueue();
 
 	/* non-copyable and non-movable */
 	SPSCQueue(const SPSCQueue &) = delete;
 	SPSCQueue &operator=(const SPSCQueue &) = delete;
-
 
 	/* producer thread only */
 	template<typename... Args>
@@ -63,18 +78,21 @@ public:
 	EYE_NODISCARD size_type GetApproxSize() const noexcept;
 
 private:
-	pointer data_;
-	struct WriterSide
+	struct alignas(kCacheLineSize) WriterSide
 	{
 		std::atomic< size_type > writeIdx{ 0ULL };
 		size_type readCacheIdx{ 0ULL };
+		pointer data{ nullptr };
 	} writer_;
-	struct ReaderSide
+	struct alignas(kCacheLineSize) ReaderSide
 	{
 		std::atomic< size_type > readIdx{ 0ULL };
 		size_type writeCacheIdx{ 0ULL };
+		pointer data{ nullptr };
 	} reader_;
+	/* cold section */
 	Allocator allocator_;
+	pointer base_;
 };
 
 // ------------------------------------------
@@ -82,22 +100,31 @@ private:
 // ------------------------------------------
 
 template<typename T, std::size_t Capacity, typename Allocator>
-SPSCQueue< T, Capacity, Allocator >::SPSCQueue(const Allocator &allocator)
-	: allocator_(allocator)
+SPSCQueue< T, Capacity, Allocator >::SPSCQueue(bool touch, const Allocator &allocator)
+	: allocator_(allocator),
+	  base_(alloc_traits::allocate(allocator_, kBaseCapacity))
 {
-	data_ = std::allocator_traits< Allocator >::allocate(allocator_, Capacity);
+	pointer data = base_ + kPadding;
+	if (touch) // touch every page with future objects
+		std::memset(static_cast< void * >(data), 0, Capacity * sizeof(T));
+
+	writer_.data = data;
+	reader_.data = data;
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
 SPSCQueue< T, Capacity, Allocator >::~SPSCQueue()
 {
-	const size_type readIdx = reader_.readIdx.load(std::memory_order_relaxed);
-	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_relaxed);
+	if constexpr (!std::is_trivially_destructible_v< T >)
+	{
+		// TODO: maybe add assert that reader_.data == writer_.data
+		const size_type readIdx = reader_.readIdx.load(std::memory_order_acquire);
+		const size_type writeIdx = writer_.writeIdx.load(std::memory_order_acquire);
 
-	for (size_type i = readIdx; i < writeIdx; ++i)
-		alloc_traits::destroy(allocator_, &data_[i & kMask]);
-
-	std::allocator_traits< Allocator >::deallocate(allocator_, data_, Capacity);
+		for (size_type i = readIdx; i != writeIdx; ++i)
+			std::destroy_at(reader_.data + (i & kMask));
+	}
+	std::allocator_traits< Allocator >::deallocate(allocator_, base_, kBaseCapacity);
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
@@ -105,14 +132,14 @@ template<typename... Args>
 bool SPSCQueue< T, Capacity, Allocator >::TryEmplace(Args &&... args)
 {
 	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_relaxed);
-	if (writeIdx - writer_.readCacheIdx == Capacity)
+	if (writeIdx - writer_.readCacheIdx == Capacity) [[unlikely]]
 	{
 		writer_.readCacheIdx = reader_.readIdx.load(std::memory_order_acquire);
-		if (writeIdx - writer_.readCacheIdx == Capacity)
+		if (writeIdx - writer_.readCacheIdx == Capacity) [[unlikely]]
 			return false;
 	}
 
-	alloc_traits::construct(allocator_, &data_[writeIdx & kMask], std::forward< Args >(args)...);
+	alloc_traits::construct(allocator_, writer_.data + (writeIdx & kMask), std::forward< Args >(args)...);
 	writer_.writeIdx.store(writeIdx + 1, std::memory_order_release);
 	return true;
 }
@@ -133,14 +160,14 @@ template<typename T, std::size_t Capacity, typename Allocator>
 T* SPSCQueue< T, Capacity, Allocator >::Front()
 {
 	const size_type readIdx = reader_.readIdx.load(std::memory_order_relaxed);
-	if (readIdx == reader_.writeCacheIdx)
+	if (readIdx == reader_.writeCacheIdx) [[unlikely]]
 	{
 		reader_.writeCacheIdx = writer_.writeIdx.load(std::memory_order_acquire);
-		if (readIdx == reader_.writeCacheIdx)
+		if (readIdx == reader_.writeCacheIdx) [[unlikely]]
 			return nullptr;
 	}
 
-	return &data_[readIdx & kMask];
+	return reader_.data + (readIdx & kMask);
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
@@ -151,7 +178,7 @@ void SPSCQueue< T, Capacity, Allocator >::Pop()
 		writer_.writeIdx.load(std::memory_order_relaxed) != readIdx &&
 		".Pop() can only be used after non-nullptr .Front()"
 	);
-	alloc_traits::destroy(allocator_, &data_[readIdx & kMask]);
+	alloc_traits::destroy(allocator_, &reader_.data[readIdx & kMask]);
 	reader_.readIdx.store(readIdx + 1, std::memory_order_release);
 }
 
@@ -166,5 +193,6 @@ auto SPSCQueue< T, Capacity, Allocator >::GetApproxSize() const noexcept -> size
 {
 	const size_type readIdx = reader_.readIdx.load(std::memory_order_acquire);
 	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_acquire);
-	return writeIdx - readIdx;
+	// TODO: test branch prediction
+	return std::min(writeIdx - readIdx, Capacity);
 }
