@@ -83,13 +83,13 @@ TEST(base, ctor)
 
 	int v[5] = {};
 	throw_detected = false;
-	NoCopy out;
 	try
 	{
-		while (q.TryPop(out))
+		while (auto* out = q.Front())
 		{
-			if (out.value <= 4 && out.value >= 0)
-				++v[out.value];
+			ASSERT_TRUE(out->value <= 4 && out->value >= 0);
+			++v[out->value];
+			q.Pop();
 		}
 	} catch (int)
 	{

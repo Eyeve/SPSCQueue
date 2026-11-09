@@ -64,7 +64,7 @@ struct OpCount
 	}
 };
 
-OpCount opCount;
+inline OpCount opCount;
 const OpCount NO_OP = OpCount();
 
 template <typename T>

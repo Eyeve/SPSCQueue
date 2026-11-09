@@ -24,8 +24,8 @@ public:
 	using value_type = T;
 	using pointer = alloc_traits::pointer;
 	using const_pointer = alloc_traits::const_pointer;
-	using reference = T &;
-	using const_reference = const T &;
+	using reference = T&;
+	using const_reference = const T&;
 	using difference_type = std::ptrdiff_t;
 	using size_type = std::size_t;
 
@@ -45,9 +45,7 @@ public:
 
 	/* non-copyable and non-movable */
 	SPSCQueue(const SPSCQueue &) = delete;
-	// SPSCQueue(SPSCQueue &&) = default;
 	SPSCQueue &operator=(const SPSCQueue &) = delete;
-	// SPSCQueue &operator=(SPSCQueue &&) = default;
 
 
 	/* producer thread only */
@@ -56,12 +54,9 @@ public:
 	EYE_NODISCARD bool TryPush(const T &value);
 	EYE_NODISCARD bool TryPush(T &&value);
 
-	// EYE_NODISCARD size_type TryPushN(const T *src, size_type n);
-
 	/* consumer thread only */
-	EYE_NODISCARD bool TryPop(T &out);
-
-	// EYE_NODISCARD size_type TryPopN(T *dst, size_type n);
+	EYE_NODISCARD T* Front();
+	void Pop();
 
 	/* info */
 	EYE_NODISCARD static constexpr size_type GetCapacity() noexcept;
@@ -135,21 +130,29 @@ bool SPSCQueue< T, Capacity, Allocator >::TryPush(T &&value)
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue< T, Capacity, Allocator >::TryPop(T& out)
+T* SPSCQueue< T, Capacity, Allocator >::Front()
 {
 	const size_type readIdx = reader_.readIdx.load(std::memory_order_relaxed);
 	if (readIdx == reader_.writeCacheIdx)
 	{
 		reader_.writeCacheIdx = writer_.writeIdx.load(std::memory_order_acquire);
 		if (readIdx == reader_.writeCacheIdx)
-			return false;
+			return nullptr;
 	}
 
-	T &temp = data_[readIdx & kMask];
-	out = std::move(temp);
-	alloc_traits::destroy(allocator_, &temp);
+	return &data_[readIdx & kMask];
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+void SPSCQueue< T, Capacity, Allocator >::Pop()
+{
+	const size_type readIdx = reader_.readIdx.load(std::memory_order_relaxed);
+	assert(
+		writer_.writeIdx.load(std::memory_order_relaxed) != readIdx &&
+		".Pop() can only be used after non-nullptr .Front()"
+	);
+	alloc_traits::destroy(allocator_, &data_[readIdx & kMask]);
 	reader_.readIdx.store(readIdx + 1, std::memory_order_release);
-	return true;
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
