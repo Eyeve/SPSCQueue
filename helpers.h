@@ -2,13 +2,6 @@
 
 #include "SPSCQueue.h"
 
-#ifdef __cpp_lib_hardware_interference_size
-	constexpr size_t kCacheLine = std::hardware_destructive_interference_size;
-#else
-	constexpr size_t kCacheLine = 64;
-#endif
-
-constexpr size_t kDefaultCapacity = 128;
 
 class NoCopy
 {
@@ -109,75 +102,42 @@ SPSCQueue< CountedOpObj<size_t>, Capacity > prepare()
 	return b;
 }
 
+#ifdef __cpp_lib_hardware_interference_size
+constexpr size_t kCacheLine = std::hardware_destructive_interference_size;
+#else
+constexpr size_t kCacheLine = 64;
+#endif
+
+constexpr size_t kDefaultCapacity = 128;
 
 using queue_sizet_t = SPSCQueue< size_t, kDefaultCapacity >;
 using queue_string_t = SPSCQueue< std::string, kDefaultCapacity >;
 using queue_nc_t = SPSCQueue< NoCopy, kDefaultCapacity >;
 using queue_co_t = SPSCQueue< CountedOpObj<size_t>, kDefaultCapacity >;
 
-/*
+template <std::size_t Size>
+struct Payload
+{
+	static_assert(Size > sizeof(std::uint64_t), "Payload must be bigger than seq");
+	std::uint64_t seq;
+	std::array<std::byte, Size - sizeof(std::uint64_t)> pad;
+};
 
-// template <std::size_t Size>
-// struct Payload
-// {
-// 	static_assert(Size > sizeof(std::uint64_t), "Payload must be bigger than seq");
-// 	std::uint64_t seq;
-// 	std::array<std::byte, Size - sizeof(std::uint64_t)> pad;
-// };
-//
-// using U64 = std::uint64_t;
-// using P64 = Payload<kCacheLine>;    // одна кэш-линия
-// using P256 = Payload<kCacheLine * 4>;  // несколько кэш-линий
+using U64 = std::uint64_t;
+using P1 = Payload<kCacheLine>;
+using P4 = Payload<kCacheLine * 4>;
 
-// template <typename T>
-// T MakeValue(std::uint64_t seq)
-// {
-// 	if constexpr (std::is_integral_v<T>)
-// 	{
-// 		return static_cast<T>(seq);
-// 	}
-// 	else
-// 	{
-// 		T v{};
-// 		v.seq = seq;
-// 		return v;
-// 	}
-// }
-
-// template <typename T>
-// std::uint64_t SeqOf(const T& v)
-// {
-// 	if constexpr (std::is_integral_v<T>)
-// 	{
-// 		return static_cast<std::uint64_t>(v);
-// 	}
-// 	else
-// 	{
-// 		return v.seq;
-// 	}
-// }
-
-// inline void CpuRelax() noexcept
-// {
-// #if defined(__x86_64__) || defined(__i386__)
-// 	_mm_pause();
-// #else
-// 	std::this_thread::yield();
-// #endif
-// }
-
-// Закрепляет текущий поток за CPU из переменной окружения (если она задана).
-// void PinThisThread([[maybe_unused]] const char* envName)
-// {
-// #if defined(__linux__)
-// 	if (const char* s = std::getenv(envName))
-// 	{
-// 		cpu_set_t set;
-// 		CPU_ZERO(&set);
-// 		CPU_SET(std::atoi(s), &set);
-// 		pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
-// 	}
-// #endif
-// }
-
-*/
+template <typename T>
+T MakeValue(std::uint64_t seq)
+{
+	if constexpr (std::is_integral_v<T>)
+	{
+		return static_cast<T>(seq);
+	}
+	else
+	{
+		T v{};
+		v.seq = seq;
+		return v;
+	}
+}
