@@ -76,6 +76,7 @@ public:
 	/* info */
 	EYE_NODISCARD static constexpr size_type GetCapacity() noexcept;
 	EYE_NODISCARD size_type GetApproxSize() const noexcept;
+	EYE_NODISCARD bool IsEmpty() const noexcept;
 
 private:
 	struct alignas(kCacheLineSize) WriterSide
@@ -195,4 +196,10 @@ auto SPSCQueue< T, Capacity, Allocator >::GetApproxSize() const noexcept -> size
 	const size_type writeIdx = writer_.writeIdx.load(std::memory_order_acquire);
 	// TODO: test branch prediction
 	return std::min(writeIdx - readIdx, Capacity);
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+bool SPSCQueue< T, Capacity, Allocator >::IsEmpty() const noexcept
+{
+	return GetApproxSize() == 0;
 }

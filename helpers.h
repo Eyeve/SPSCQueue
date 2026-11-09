@@ -89,31 +89,28 @@ struct CountedOpObj
 	bool operator==(const CountedOpObj &rhs) const { return value == rhs.value; }
 };
 
-template <size_t Capacity>
-SPSCQueue< CountedOpObj<size_t>, Capacity > prepare()
-{
-	size_t n = Capacity / 2;
-	auto b = SPSCQueue< CountedOpObj<size_t>, Capacity >();
-	for (size_t i = 0; i < n; ++i)
-	{
-		b.insert(CountedOpObj<size_t>(i));
-	}
-	opCount.clearCounters();
-	return b;
-}
-
 #ifdef __cpp_lib_hardware_interference_size
 constexpr size_t kCacheLine = std::hardware_destructive_interference_size;
 #else
 constexpr size_t kCacheLine = 64;
 #endif
 
-constexpr size_t kDefaultCapacity = 128;
+constexpr size_t kDefaultCapacity = 1024;
 
 using queue_sizet_t = SPSCQueue< size_t, kDefaultCapacity >;
 using queue_string_t = SPSCQueue< std::string, kDefaultCapacity >;
 using queue_nc_t = SPSCQueue< NoCopy, kDefaultCapacity >;
 using queue_co_t = SPSCQueue< CountedOpObj<size_t>, kDefaultCapacity >;
+
+void prepare(queue_co_t& q)
+{
+	size_t n = q.GetCapacity() / 2;
+	for (size_t i = 0; i < n; ++i)
+	{
+		q.TryPush(CountedOpObj<size_t>(i));
+	}
+	opCount.clearCounters();
+}
 
 template <std::size_t Size>
 struct Payload
