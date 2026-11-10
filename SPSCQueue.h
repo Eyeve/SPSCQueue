@@ -39,21 +39,24 @@ public:
 	using size_type = std::size_t;
 
 private:
-	static_assert(std::has_single_bit(Capacity), "Capacity must be power of two");
-	static_assert(std::is_nothrow_destructible_v< T >, "T must be nothrow destructible");
 	static constexpr size_type kMask = Capacity - 1;
-	// TODO: maybe find another way to get cache line size
-#ifdef __cpp_lib_hardware_interference_size
-	static constexpr size_type kCacheLineSize = std::hardware_destructive_interference_size;
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__)
+	static constexpr size_type kCacheLineSize = 128;
 #else
 	static constexpr size_type kCacheLineSize = 64;
 #endif
+
 	/*
 	 * The allocator does not guarantee data alignment,
 	 * so need to use padding on both sides of the buffer
 	 */
 	static constexpr size_type kPadding = (kCacheLineSize - 1) / sizeof(T) + 1;
 	static constexpr size_type kBaseCapacity = Capacity + kPadding * 2;
+
+	static_assert(std::has_single_bit(Capacity), "Capacity must be power of two");
+	static_assert(std::has_single_bit(kCacheLineSize), "Cache line size must be power of two");
+	static_assert(std::is_nothrow_destructible_v< T >, "T must be nothrow destructible");
+	static_assert(kCacheLineSize % alignof(T) == 0, "T can't be aligned to start of cache line");
 
 public:
 	explicit SPSCQueue(bool touch = true, const Allocator &allocator = Allocator());
@@ -66,6 +69,7 @@ public:
 	/* producer thread only */
 	template<typename... Args>
 	EYE_NODISCARD bool TryEmplace(Args &&... args);
+	EYE_NODISCARD
 	EYE_NODISCARD bool TryPush(const T &value);
 	EYE_NODISCARD bool TryPush(T &&value);
 
@@ -105,7 +109,13 @@ SPSCQueue< T, Capacity, Allocator >::SPSCQueue(bool touch, const Allocator &allo
 	: allocator_(allocator),
 	  base_(alloc_traits::allocate(allocator_, kBaseCapacity))
 {
-	pointer data = base_ + kPadding;
+	static constexpr size_type kDataSize = Capacity * sizeof(T);
+	void* ptr = base_;
+	size_type space = kBaseCapacity * sizeof(T);
+	pointer data = static_cast<pointer>(std::align(kCacheLineSize, kDataSize, ptr, space));
+
+	assert(data != nullptr && "Failed to align data: space provided is too small");
+
 	if (touch) // touch every page with future objects
 		std::memset(static_cast< void * >(data), 0, Capacity * sizeof(T));
 
