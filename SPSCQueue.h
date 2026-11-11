@@ -96,8 +96,6 @@ private:
 	static_assert(Capacity <= std::numeric_limits<size_t>::max() / sizeof(T) - 2 * kPadding, "No space for padding");
 	// nothrow ctr, exception guarantee
 	// have ctr
-	// readIdx <= writeIdx (or overflow)
-	// what if writeIdx overflow hmmm
 
 public:
 	explicit SPSCQueue(bool touch = true, const Allocator &allocator = Allocator());
@@ -109,25 +107,25 @@ public:
 
 	/* producer thread only, immediate mode: published right away */
 	template<typename... Args>
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryEmplace(Args &&... args);
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPush(const T &value);
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPush(T &&value);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryEmplace(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args &&...>);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPush(const T &value) noexcept(std::is_nothrow_copy_constructible_v<T>);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPush(T &&value) noexcept(std::is_nothrow_move_constructible_v<T>);
 
 	/* producer thread only, lazy mode: invisible to the consumer until CommitWrite() */
 	template<typename... Args>
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryEmplaceLazy(Args &&... args);
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPushLazy(const T &value);
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPushLazy(T &&value);
-	EYE_ALWAYS_INLINE void CommitWrite();
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryEmplaceLazy(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args &&...>);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPushLazy(const T &value) noexcept(std::is_nothrow_copy_constructible_v<T>);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPushLazy(T &&value) noexcept(std::is_nothrow_move_constructible_v<T>);
+	EYE_ALWAYS_INLINE void CommitWrite() noexcept;
 
 	/* consumer thread only, immediate mode: slot is released right away */
-	EYE_NODISCARD EYE_ALWAYS_INLINE T* Front();
-	EYE_ALWAYS_INLINE void Pop();
+	EYE_NODISCARD EYE_ALWAYS_INLINE T* Front() noexcept;
+	EYE_ALWAYS_INLINE void Pop() noexcept;
 
 	/* consumer thread only, lazy mode: slots are released by CommitRead() */
-	EYE_NODISCARD EYE_ALWAYS_INLINE T* FrontLazy();
-	EYE_ALWAYS_INLINE void PopLazy();
-	EYE_ALWAYS_INLINE void CommitRead();
+	EYE_NODISCARD EYE_ALWAYS_INLINE T* FrontLazy() noexcept;
+	EYE_ALWAYS_INLINE void PopLazy() noexcept;
+	EYE_ALWAYS_INLINE void CommitRead() noexcept;
 
 	/* info, any thread */
 	EYE_NODISCARD static constexpr size_type GetCapacity() noexcept;
@@ -135,64 +133,18 @@ public:
 	EYE_NODISCARD bool IsEmpty() const noexcept;
 
 private:
-	EYE_NODISCARD EYE_ALWAYS_INLINE static pointer SlotAt(pointer data, size_type idx) noexcept
-	{
-		return data + (idx & kMask);
-	}
+	EYE_NODISCARD EYE_ALWAYS_INLINE static pointer SlotAt(pointer data, size_type idx) noexcept;
 
-	/* Own-side indices. Relaxed loads are enough: only the owning thread writes them. */
-	EYE_NODISCARD EYE_ALWAYS_INLINE size_type PublishedWrite() const noexcept
-	{
-		return writer_.publishedWriteIdx.load(std::memory_order_relaxed);
-	}
-	EYE_NODISCARD EYE_ALWAYS_INLINE size_type PublishedRead() const noexcept
-	{
-		return reader_.publishedReadIdx.load(std::memory_order_relaxed);
-	}
-	/* Own-side position including uncommitted lazy operations. */
-	EYE_NODISCARD EYE_ALWAYS_INLINE size_type WritePos() const noexcept { return PublishedWrite() + writer_.pending; }
-	EYE_NODISCARD EYE_ALWAYS_INLINE size_type ReadPos() const noexcept { return PublishedRead() + reader_.pending; }
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type PublishedWrite() const noexcept;
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type PublishedRead() const noexcept;
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type WritePos() const noexcept;
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type ReadPos() const noexcept;
 
-	/* Producer: is slot `write` free? Re-reads the shared read index only if the cache says "full". */
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool HasRoom(size_type write) noexcept
-	{
-		if (write - writer_.readCacheIdx == Capacity) [[unlikely]]
-		{
-			writer_.readCacheIdx = reader_.publishedReadIdx.load(std::memory_order_acquire);
-			if (write - writer_.readCacheIdx == Capacity) [[unlikely]]
-				return false;
-		}
-		return true;
-	}
-
-	/* Producer: construct an element in slot `write` if there is room. Does not publish. */
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool HasRoom(size_type write) noexcept;
 	template<typename... Args>
-	EYE_NODISCARD EYE_ALWAYS_INLINE bool EmplaceAt(size_type write, Args &&... args)
-	{
-		if (!HasRoom(write)) [[unlikely]]
-			return false;
-		std::construct_at(SlotAt(writer_.data, write), std::forward< Args >(args)...);
-		return true;
-	}
-
-	/* Consumer: element at `read`, or nullptr if it is not published yet. */
-	EYE_NODISCARD EYE_ALWAYS_INLINE T* FrontAt(size_type read) noexcept
-	{
-		if (read == reader_.writeCacheIdx) [[unlikely]]
-		{
-			reader_.writeCacheIdx = writer_.publishedWriteIdx.load(std::memory_order_acquire);
-			if (read == reader_.writeCacheIdx) [[unlikely]]
-				return nullptr;
-		}
-		return SlotAt(reader_.data, read);
-	}
-
-	/* Consumer: destroy the element at `read`. Does not release the slot. */
-	EYE_ALWAYS_INLINE void DestroyAt(size_type read) noexcept
-	{
-		assert(reader_.writeCacheIdx != read && "Pop can only be used after a non-nullptr Front");
-		std::destroy_at(SlotAt(reader_.data, read));
-	}
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool EmplaceAt(size_type write, Args &&... args);
+	EYE_NODISCARD EYE_ALWAYS_INLINE pointer FrontAt(size_type read) noexcept;
+	EYE_ALWAYS_INLINE void DestroyAt(size_type read) noexcept;
 
 private:
 	struct alignas(kCacheLineSize) WriterSide
@@ -217,6 +169,77 @@ private:
 // ------------------------------------------
 // START OF SPSC-QUEUE IMPLEMENTATION
 // ------------------------------------------
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::SlotAt(pointer data, size_type idx) noexcept -> pointer
+{
+	return data + (idx & kMask);
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::PublishedWrite() const noexcept -> size_type
+{
+	return writer_.publishedWriteIdx.load(std::memory_order_relaxed);
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::PublishedRead() const noexcept -> size_type
+{
+	return reader_.publishedReadIdx.load(std::memory_order_relaxed);
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::WritePos() const noexcept -> size_type
+{
+	return PublishedWrite() + writer_.pending;
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::ReadPos() const noexcept -> size_type
+{
+	return PublishedRead() + reader_.pending;
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+bool SPSCQueue< T, Capacity, Allocator >::HasRoom(size_type write) noexcept
+{
+	if (write - writer_.readCacheIdx == Capacity) [[unlikely]]
+	{
+		writer_.readCacheIdx = reader_.publishedReadIdx.load(std::memory_order_acquire);
+		if (write - writer_.readCacheIdx == Capacity) [[unlikely]]
+			return false;
+	}
+	return true;
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+template<typename... Args>
+bool SPSCQueue< T, Capacity, Allocator >::EmplaceAt(size_type write, Args &&... args)
+{
+	if (!HasRoom(write)) [[unlikely]]
+		return false;
+	std::construct_at(SlotAt(writer_.data, write), std::forward< Args >(args)...);
+	return true;
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+auto SPSCQueue< T, Capacity, Allocator >::FrontAt(size_type read) noexcept -> pointer
+{
+	if (read == reader_.writeCacheIdx) [[unlikely]]
+	{
+		reader_.writeCacheIdx = writer_.publishedWriteIdx.load(std::memory_order_acquire);
+		if (read == reader_.writeCacheIdx) [[unlikely]]
+			return nullptr;
+	}
+	return SlotAt(reader_.data, read);
+}
+
+template<typename T, std::size_t Capacity, typename Allocator>
+void SPSCQueue< T, Capacity, Allocator >::DestroyAt(size_type read) noexcept
+{
+	assert(reader_.writeCacheIdx != read && "Pop can only be used after a non-nullptr Front");
+	std::destroy_at(SlotAt(reader_.data, read));
+}
 
 template<typename T, std::size_t Capacity, typename Allocator>
 SPSCQueue< T, Capacity, Allocator >::SPSCQueue(bool touch, const Allocator &allocator)
@@ -251,8 +274,9 @@ SPSCQueue< T, Capacity, Allocator >::~SPSCQueue()
 
 template<typename T, std::size_t Capacity, typename Allocator>
 template<typename... Args>
-bool SPSCQueue< T, Capacity, Allocator >::TryEmplace(Args &&... args)
+bool SPSCQueue< T, Capacity, Allocator >::TryEmplace(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args &&...>)
 {
+	static_assert(std::is_constructible_v<T, Args &&...>);
 	assert(writer_.pending == 0 && "TryEmplace() with uncommitted lazy writes: call CommitWrite() first");
 	const size_type write = PublishedWrite();
 	if (!EmplaceAt(write, std::forward< Args >(args)...)) [[unlikely]]
@@ -263,8 +287,9 @@ bool SPSCQueue< T, Capacity, Allocator >::TryEmplace(Args &&... args)
 
 template<typename T, std::size_t Capacity, typename Allocator>
 template<typename... Args>
-bool SPSCQueue< T, Capacity, Allocator >::TryEmplaceLazy(Args &&... args)
+bool SPSCQueue< T, Capacity, Allocator >::TryEmplaceLazy(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args &&...>)
 {
+	static_assert(std::is_constructible_v<T, Args &&...>);
 	if (!EmplaceAt(WritePos(), std::forward< Args >(args)...)) [[unlikely]]
 		return false;
 	++writer_.pending;
@@ -272,31 +297,35 @@ bool SPSCQueue< T, Capacity, Allocator >::TryEmplaceLazy(Args &&... args)
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue< T, Capacity, Allocator >::TryPush(const T &value)
+bool SPSCQueue< T, Capacity, Allocator >::TryPush(const T &value) noexcept(std::is_nothrow_copy_constructible_v<T>)
 {
+	static_assert(std::is_copy_constructible_v<T>);
 	return TryEmplace(value);
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue< T, Capacity, Allocator >::TryPush(T &&value)
+bool SPSCQueue< T, Capacity, Allocator >::TryPush(T &&value) noexcept(std::is_nothrow_move_constructible_v<T>)
 {
+	static_assert(std::is_move_constructible_v<T>);
 	return TryEmplace(std::move(value));
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue< T, Capacity, Allocator >::TryPushLazy(const T &value)
+bool SPSCQueue< T, Capacity, Allocator >::TryPushLazy(const T &value) noexcept(std::is_nothrow_copy_constructible_v<T>)
 {
+	static_assert(std::is_copy_constructible_v<T>);
 	return TryEmplaceLazy(value);
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-bool SPSCQueue< T, Capacity, Allocator >::TryPushLazy(T &&value)
+bool SPSCQueue< T, Capacity, Allocator >::TryPushLazy(T &&value) noexcept(std::is_nothrow_move_constructible_v<T>)
 {
+	static_assert(std::is_move_constructible_v<T>);
 	return TryEmplaceLazy(std::move(value));
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-void SPSCQueue< T, Capacity, Allocator >::CommitWrite()
+void SPSCQueue< T, Capacity, Allocator >::CommitWrite() noexcept
 {
 	writer_.publishedWriteIdx.store(WritePos(), std::memory_order_release);
 	writer_.pending = 0;
@@ -305,20 +334,20 @@ void SPSCQueue< T, Capacity, Allocator >::CommitWrite()
 /* ---------------------------- consumer ---------------------------- */
 
 template<typename T, std::size_t Capacity, typename Allocator>
-T* SPSCQueue< T, Capacity, Allocator >::Front()
+T* SPSCQueue< T, Capacity, Allocator >::Front() noexcept
 {
 	assert(reader_.pending == 0 && "Front() with uncommitted lazy pops: use FrontLazy() or call CommitRead() first");
 	return FrontAt(PublishedRead());
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-T* SPSCQueue< T, Capacity, Allocator >::FrontLazy()
+T* SPSCQueue< T, Capacity, Allocator >::FrontLazy() noexcept
 {
 	return FrontAt(ReadPos());
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-void SPSCQueue< T, Capacity, Allocator >::Pop()
+void SPSCQueue< T, Capacity, Allocator >::Pop() noexcept
 {
 	assert(reader_.pending == 0 && "Pop() with uncommitted lazy pops: call CommitRead() first");
 	const size_type read = PublishedRead();
@@ -327,14 +356,14 @@ void SPSCQueue< T, Capacity, Allocator >::Pop()
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-void SPSCQueue< T, Capacity, Allocator >::PopLazy()
+void SPSCQueue< T, Capacity, Allocator >::PopLazy() noexcept
 {
 	DestroyAt(ReadPos());
 	++reader_.pending;
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-void SPSCQueue< T, Capacity, Allocator >::CommitRead()
+void SPSCQueue< T, Capacity, Allocator >::CommitRead() noexcept
 {
 	reader_.publishedReadIdx.store(ReadPos(), std::memory_order_release);
 	reader_.pending = 0;
