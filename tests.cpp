@@ -145,6 +145,7 @@ TEST(base, pop)
 	for (size_t i = 0; i < n; ++i)
 	{
 		ASSERT_EQ(q.GetApproxSize(), n - i);
+		q.Front();
 		q.Pop();
 	}
 

@@ -23,9 +23,16 @@ FetchContent_Declare(
 )
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 
+FetchContent_Declare(
+        mimalloc
+        URL https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.1.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+
 FetchContent_MakeAvailable(
         googletest
         googlebenchmark
+        mimalloc
 )
 
 # Tests
@@ -37,6 +44,7 @@ target_link_libraries(${PROJECT_NAME}-test
         PRIVATE
         GTest::gtest
         GTest::gtest_main
+        mimalloc
 )
 
 # Benchmarks
@@ -50,6 +58,7 @@ target_link_libraries(${PROJECT_NAME}-bench
         PRIVATE
         benchmark::benchmark
         benchmark::benchmark_main
+        mimalloc
 )
 
 target_compile_options(${PROJECT_NAME}-bench PRIVATE

@@ -33,6 +33,8 @@
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <mimalloc-new-delete.h>
+#include <mimalloc.h>
 
 #include "SPSCQueue.h"
 #include "source/SPSCQueueEx.h"
@@ -225,11 +227,11 @@ using P256 = Payload<256>;
 // Rigtorp's queue (SPSCQueueEx.h): runtime capacity -> adapt to Queue<T, N>.
 // It does not touch its memory on construction, so pre-fault it here, the same way
 // SPSCQueue does with touch=true. Otherwise page faults would land in the measured region.
-template<typename T, std::size_t N>
-class RigtorpQueue : public SPSCQueueEx<T>
+template<typename T, std::size_t N, typename Allocator>
+class RigtorpQueue : public SPSCQueueEx<T, Allocator>
 {
 public:
-	RigtorpQueue() : SPSCQueueEx<T>(N)
+	RigtorpQueue() : SPSCQueueEx<T, Allocator>(N)
 	{
 		for (std::size_t i = 0; i < N; ++i)
 			(void)this->TryEmplace();
@@ -304,12 +306,12 @@ private:
 struct EyeKind
 {
 	static constexpr const char *name = "eye";
-	template<class T, std::size_t N> using Queue = SPSCQueue<T, N>;
+	template<class T, std::size_t N> using Queue = SPSCQueue<T, N, mi_stl_allocator<T>>;
 };
 struct RigtorpKind
 {
 	static constexpr const char *name = "rigtorp";
-	template<class T, std::size_t N> using Queue = RigtorpQueue<T, N>;
+	template<class T, std::size_t N> using Queue = RigtorpQueue<T, N, mi_stl_allocator<T>>;
 };
 struct NaiveKind
 {
@@ -323,7 +325,7 @@ struct MutexKind
 };
 
 template<class... Ks> struct List {};
-using AllQueues = List<EyeKind, RigtorpKind, NaiveKind, MutexKind>;
+using AllQueues = List<NaiveKind, MutexKind, RigtorpKind, EyeKind>;
 
 template<class... Ks>
 bool IsKnownQueue(const std::string &n, List<Ks...>) { return ((n == Ks::name) || ...); }
@@ -748,6 +750,9 @@ void ParseOptions(int &argc, char **argv)
 			throw std::invalid_argument("--spsc_lat_loads: interval and burst must be > 0");
 	if (g_opt.items == 0 || g_opt.latSeconds <= 0)
 		throw std::invalid_argument("--spsc_items and --spsc_lat_seconds must be > 0");
+	if (g_opt.prodCpu >= 0 && g_opt.prodCpu == g_opt.consCpu)
+		throw std::invalid_argument("--spsc_prod_cpu and --spsc_cons_cpu must differ: "
+									"two spinning threads on one cpu only progress when preempted");
 }
 
 void PrintBanner()
