@@ -1,5 +1,5 @@
 /*
-* Bounded lock-free SPSC queue: exactly one producer thread and one consumer thread.
+ * Bounded lock-free SPSC queue: exactly one producer thread and one consumer thread.
  *
  * Each side has two modes. They must not be mixed while anything is uncommitted:
  *
@@ -39,6 +39,11 @@
 #include <type_traits>
 #include <utility>
 
+#ifndef EYE_NODISCARD
+#define EYE_NODISCARD [[nodiscard]]
+#endif
+
+#ifndef EYE_ALWAYS_INLINE
 #if defined(__GNUC__) || defined(__clang__)
 #define EYE_ALWAYS_INLINE [[gnu::always_inline]] inline
 #elif defined(_MSC_VER)
@@ -46,9 +51,10 @@
 #else
 #define EYE_ALWAYS_INLINE inline
 #endif
+#endif
 
 // ------------------------------------------
-// START OF SPCS-QUEUE INTERFACE
+// START OF SPSC-QUEUE INTERFACE
 // ------------------------------------------
 
 template<typename T, std::size_t Capacity, typename Allocator = std::allocator< T > >
@@ -69,9 +75,9 @@ public:
 private:
 	static constexpr size_type kMask = Capacity - 1;
 	static constexpr size_type kDataBytes = Capacity * sizeof(T);
-#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__)
 	// 128 bytes: avoids false sharing through the adjacent-line prefetcher (x86-64)
 	// and covers 128-byte cache lines (Apple ARM64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__)
 	static constexpr size_type kCacheLineSize = 128;
 #else
 	static constexpr size_type kCacheLineSize = 64;
@@ -103,52 +109,52 @@ public:
 
 	/* producer thread only, immediate mode: published right away */
 	template<typename... Args>
-	[[nodiscard]] EYE_ALWAYS_INLINE bool TryEmplace(Args &&... args);
-	[[nodiscard]] EYE_ALWAYS_INLINE bool TryPush(const T &value);
-	[[nodiscard]] EYE_ALWAYS_INLINE bool TryPush(T &&value);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryEmplace(Args &&... args);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPush(const T &value);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPush(T &&value);
 
 	/* producer thread only, lazy mode: invisible to the consumer until CommitWrite() */
 	template<typename... Args>
-	[[nodiscard]] EYE_ALWAYS_INLINE bool TryEmplaceLazy(Args&&... args);
-	[[nodiscard]] EYE_ALWAYS_INLINE bool TryPushLazy(const T& value);
-	[[nodiscard]] EYE_ALWAYS_INLINE bool TryPushLazy(T &&value);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryEmplaceLazy(Args &&... args);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPushLazy(const T &value);
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool TryPushLazy(T &&value);
 	EYE_ALWAYS_INLINE void CommitWrite();
 
 	/* consumer thread only, immediate mode: slot is released right away */
-	[[nodiscard]] EYE_ALWAYS_INLINE T* Front();
+	EYE_NODISCARD EYE_ALWAYS_INLINE T* Front();
 	EYE_ALWAYS_INLINE void Pop();
 
 	/* consumer thread only, lazy mode: slots are released by CommitRead() */
-	[[nodiscard]] EYE_ALWAYS_INLINE T* FrontLazy();
+	EYE_NODISCARD EYE_ALWAYS_INLINE T* FrontLazy();
 	EYE_ALWAYS_INLINE void PopLazy();
 	EYE_ALWAYS_INLINE void CommitRead();
 
 	/* info, any thread */
-	[[nodiscard]] static constexpr size_type GetCapacity() noexcept;
-	[[nodiscard]] size_type GetApproxSize() const noexcept;
-	[[nodiscard]] bool IsEmpty() const noexcept;
+	EYE_NODISCARD static constexpr size_type GetCapacity() noexcept;
+	EYE_NODISCARD size_type GetApproxSize() const noexcept;
+	EYE_NODISCARD bool IsEmpty() const noexcept;
 
 private:
-	EYE_ALWAYS_INLINE static pointer SlotAt(pointer data, size_type idx) noexcept
+	EYE_NODISCARD EYE_ALWAYS_INLINE static pointer SlotAt(pointer data, size_type idx) noexcept
 	{
 		return data + (idx & kMask);
 	}
 
 	/* Own-side indices. Relaxed loads are enough: only the owning thread writes them. */
-	[[nodiscard]] EYE_ALWAYS_INLINE size_type PublishedWrite() const noexcept
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type PublishedWrite() const noexcept
 	{
 		return writer_.publishedWriteIdx.load(std::memory_order_relaxed);
 	}
-	[[nodiscard]] EYE_ALWAYS_INLINE size_type PublishedRead() const noexcept
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type PublishedRead() const noexcept
 	{
 		return reader_.publishedReadIdx.load(std::memory_order_relaxed);
 	}
 	/* Own-side position including uncommitted lazy operations. */
-	[[nodiscard]] EYE_ALWAYS_INLINE size_type WritePos() const noexcept { return PublishedWrite() + writer_.pending; }
-	[[nodiscard]] EYE_ALWAYS_INLINE size_type ReadPos() const noexcept { return PublishedRead() + reader_.pending; }
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type WritePos() const noexcept { return PublishedWrite() + writer_.pending; }
+	EYE_NODISCARD EYE_ALWAYS_INLINE size_type ReadPos() const noexcept { return PublishedRead() + reader_.pending; }
 
 	/* Producer: is slot `write` free? Re-reads the shared read index only if the cache says "full". */
-	[[nodiscard]] EYE_ALWAYS_INLINE bool HasRoom(size_type write) noexcept
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool HasRoom(size_type write) noexcept
 	{
 		if (write - writer_.readCacheIdx == Capacity) [[unlikely]]
 		{
@@ -161,7 +167,7 @@ private:
 
 	/* Producer: construct an element in slot `write` if there is room. Does not publish. */
 	template<typename... Args>
-	[[nodiscard]] EYE_ALWAYS_INLINE bool EmplaceAt(size_type write, Args &&... args)
+	EYE_NODISCARD EYE_ALWAYS_INLINE bool EmplaceAt(size_type write, Args &&... args)
 	{
 		if (!HasRoom(write)) [[unlikely]]
 			return false;
@@ -170,7 +176,7 @@ private:
 	}
 
 	/* Consumer: element at `read`, or nullptr if it is not published yet. */
-	[[nodiscard]] EYE_ALWAYS_INLINE T* FrontAt(size_type read) noexcept
+	EYE_NODISCARD EYE_ALWAYS_INLINE T* FrontAt(size_type read) noexcept
 	{
 		if (read == reader_.writeCacheIdx) [[unlikely]]
 		{
@@ -201,7 +207,7 @@ private:
 		std::atomic< size_type > publishedReadIdx{ 0ULL };
 		size_type pending{ 0ULL };		// popped, not yet released (lazy API only)
 		size_type writeCacheIdx{ 0ULL };
-		pointer data{ nullptr };		// copy of the buffer pointer: keeps the hot path on its own line
+		pointer data{ nullptr };
 	} reader_;
 	/* cold section */
 	Allocator allocator_;
@@ -209,7 +215,7 @@ private:
 };
 
 // ------------------------------------------
-// START OF SPCS-QUEUE IMPLEMENTATION
+// START OF SPSC-QUEUE IMPLEMENTATION
 // ------------------------------------------
 
 template<typename T, std::size_t Capacity, typename Allocator>
@@ -217,10 +223,9 @@ SPSCQueue< T, Capacity, Allocator >::SPSCQueue(bool touch, const Allocator &allo
 	: allocator_(allocator),
 	  base_(alloc_traits::allocate(allocator_, kBaseCapacity))
 {
-	void* ptr = base_;
+	void *ptr = base_;
 	size_type space = kBaseCapacity * sizeof(T);
-	auto data = static_cast<pointer>(std::align(kCacheLineSize, kDataBytes, ptr, space));
-
+	auto data = static_cast< pointer >(std::align(kCacheLineSize, kDataBytes, ptr, space));
 	assert(data != nullptr && "Failed to align data: space provided is too small");
 
 	if (touch) // touch every page with future objects
@@ -307,7 +312,7 @@ T* SPSCQueue< T, Capacity, Allocator >::Front()
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
-T *SPSCQueue< T, Capacity, Allocator >::FrontLazy()
+T* SPSCQueue< T, Capacity, Allocator >::FrontLazy()
 {
 	return FrontAt(ReadPos());
 }
@@ -351,7 +356,6 @@ auto SPSCQueue< T, Capacity, Allocator >::GetApproxSize() const noexcept -> size
 	const size_type read = reader_.publishedReadIdx.load(std::memory_order_acquire);
 	const size_type write = writer_.publishedWriteIdx.load(std::memory_order_acquire);
 	return std::min(write - read, Capacity);
-
 }
 
 template<typename T, std::size_t Capacity, typename Allocator>
