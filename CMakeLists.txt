@@ -49,9 +49,7 @@ target_link_libraries(${PROJECT_NAME}-test
 
 # Benchmarks
 add_executable(${PROJECT_NAME}-bench
-        # benchmarks.cpp
-        # source/SPSCQueueEx.h
-        spsc_bench.cpp
+        benchmarks.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}-bench
