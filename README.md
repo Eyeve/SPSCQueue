@@ -1,99 +1,99 @@
 # SPSCQueue
 
-Ограниченная (bounded) lock-free очередь типа **single-producer / single-consumer**: ровно один поток-производитель и ровно один поток-потребитель.
+A bounded lock-free queue of **single-producer / single-consumer** type: exactly one producer thread and exactly one consumer thread.
 
 ```cpp
 template<typename T, std::size_t Capacity, typename Allocator = std::allocator<T>>
 class SPSCQueue;
 ```
 
-## Кратко
+## Overview
 
-- `Capacity` — обязана быть степенью двойки (проверяется `static_assert`).
-- Индексы — монотонно растущие счётчики, работают через переполнение `size_t`.
-- Каждая сторона кэширует индекс противоположной стороны, чтобы лишний раз не трогать общий атомик.
-- `writer_` и `reader_` выровнены по кэш-линии (128 байт на x86-64/ARM64, иначе 64), чтобы избежать false sharing.
-- `T` должен быть **nothrow-destructible** и выровнен под начало кэш-линии.
+- `Capacity` must be a power of two (enforced by `static_assert`).
+- Indices are monotonically increasing counters that work through `size_t` wraparound.
+- Each side caches the opposite side's index to avoid touching the shared atomic unnecessarily.
+- `writer_` and `reader_` are aligned to a cache line (128 bytes on x86-64/ARM64, otherwise 64) to avoid false sharing.
+- `T` must be **nothrow-destructible** and aligned to the start of a cache line.
 
-## Два режима
+## Two modes
 
-Обе стороны имеют два режима, и **смешивать их, пока что-то не закоммичено, нельзя**.
+Both sides have two modes, and **you cannot mix them while something is uncommitted**.
 
 ### Immediate
-Каждая операция сразу же публикуется второй стороне.
+Each operation is published to the other side immediately.
 
 ```cpp
 // producer
-queue.TryEmplace(...);   // или TryPush(lvalue), TryPush(rvalue)
+queue.TryEmplace(...);   // or TryPush(lvalue), TryPush(rvalue)
 // consumer
-T* p = queue.Front();    // nullptr если пусто
+T* p = queue.Front();    // nullptr if empty
 if (p) queue.Pop();
 ```
 
 ### Lazy
-Публикация батча делается одним `release`-store в `Commit*()`.
+A batch is published with a single `release`-store in `Commit*()`.
 
 ```cpp
 // producer
 queue.TryEmplaceLazy(a);
 queue.TryEmplaceLazy(b);
-queue.CommitWrite();     // всё вышеописанное становится видимым потребителю
+queue.CommitWrite();     // everything above becomes visible to the consumer
 
 // consumer
 while (T* p = queue.FrontLazy()) {
     consume(*p);
     queue.PopLazy();
 }
-queue.CommitRead();      // слоты становятся доступны производителю
+queue.CommitRead();      // slots become available to the producer
 ```
 
-- Лениво записанные элементы **невидимы** потребителю до `CommitWrite()`.
-- Лениво освобождённые слоты **не переиспользуются** производителем до `CommitRead()`.
+- Lazily written elements are **invisible** to the consumer until `CommitWrite()`.
+- Lazily freed slots are **not reused** by the producer until `CommitRead()`.
 
-## Контракты
+## Contracts
 
-### Потоки
+### Threads
 
-| Метод | Кто может вызывать |
+| Method | Who may call it |
 |---|---|
-| `TryEmplace`, `TryPush`, `TryEmplaceLazy`, `TryPushLazy`, `CommitWrite` | только producer |
-| `Front`, `Pop`, `FrontLazy`, `PopLazy`, `CommitRead` | только consumer |
-| `GetCapacity`, `GetApproxSize`, `IsEmpty` | любой поток |
-| `~SPSCQueue` | никто не должен пользоваться очередью |
+| `TryEmplace`, `TryPush`, `TryEmplaceLazy`, `TryPushLazy`, `CommitWrite` | producer only |
+| `Front`, `Pop`, `FrontLazy`, `PopLazy`, `CommitRead` | consumer only |
+| `GetCapacity`, `GetApproxSize`, `IsEmpty` | any thread |
+| `~SPSCQueue` | no one must be using the queue |
 
-### Режимы
+### Modes
 
-- Нельзя вызывать `TryEmplace*` / `TryPush*`, пока `writer_.pending != 0` (то есть пока не вызван `CommitWrite()`).
-- Нельзя вызывать `Front()` / `Pop()` пока `reader_.pending != 0` (то есть пока не вызван `CommitRead()`).
-- `Pop()` / `PopLazy()` допустимо вызывать только после успешного (`!= nullptr`) `Front()` / `FrontLazy()`.
+- You must not call `TryEmplace*` / `TryPush*` while `writer_.pending != 0` (that is, until `CommitWrite()` has been called).
+- You must not call `Front()` / `Pop()` while `reader_.pending != 0` (that is, until `CommitRead()` has been called).
+- `Pop()` / `PopLazy()` may only be called after a successful (`!= nullptr`) `Front()` / `FrontLazy()`.
 
-Всё это проверяется через `assert`, то есть в release-сборке — **UB при нарушении**.
+All of this is checked via `assert`, meaning that in a release build it is **UB to violate these rules**.
 
-### Параметры шаблона
+### Template parameters
 
-- `Capacity` — степень двойки, не 0.
+- `Capacity` — a power of two, not 0.
 - `T` — `nothrow_destructible`.
-- `alignof(T)` делит размер кэш-линии.
+- `alignof(T)` divides the cache-line size.
 
-## Гарантии исключений
+## Exception guarantees
 
-| Операция | Спецификация | Гарантия |
+| Operation | Specification | Guarantee |
 |---|---|---|
-| `SPSCQueue(bool, const Allocator&)` | может бросить (`bad_alloc`, исключение из копии аллокатора) | **strong**: при исключении ничего не утекло, объект не создан |
-| `~SPSCQueue()` | `noexcept` | не бросает |
-| `TryEmplace`, `TryEmplaceLazy`, `TryPush*` | `noexcept(is_nothrow_constructible_v<T, Args&&...>)` | **strong**: если конструктор `T` бросит, состояние очереди не меняется (индексы не двигаются, слот не тронут) |
-| `CommitWrite`, `CommitRead` | `noexcept` | не бросает |
-| `Front`, `FrontLazy` | `noexcept` | не бросает, возвращает `nullptr` если пусто |
-| `Pop`, `PopLazy` | `noexcept` | не бросает (требуется nothrow-destructible `T`) |
-| `GetCapacity`, `GetApproxSize`, `IsEmpty` | `noexcept` | не бросает |
+| `SPSCQueue(bool, const Allocator&)` | may throw (`bad_alloc`, exception from the allocator copy) | **strong**: on exception nothing leaked, the object was not created |
+| `~SPSCQueue()` | `noexcept` | does not throw |
+| `TryEmplace`, `TryEmplaceLazy`, `TryPush*` | `noexcept(is_nothrow_constructible_v<T, Args&&...>)` | **strong**: if `T`'s constructor throws, the queue state is unchanged (indices do not move, the slot is untouched) |
+| `CommitWrite`, `CommitRead` | `noexcept` | does not throw |
+| `Front`, `FrontLazy` | `noexcept` | does not throw, returns `nullptr` if empty |
+| `Pop`, `PopLazy` | `noexcept` | does not throw (requires nothrow-destructible `T`) |
+| `GetCapacity`, `GetApproxSize`, `IsEmpty` | `noexcept` | does not throw |
 
-Итого:
+Summary:
 
-- **Единственное место, где может вылететь исключение** — конструктор очереди (выделение памяти) и конструктор самого `T` внутри `Try*`.
-- В `Try*`-операциях обеспечена **strong**-гарантия: при броске исключения очередь остаётся в точности в том же состоянии.
-- Всё, что делает `Pop*`, `Commit*`, `Front*`, — `noexcept`.
+- **The only places where an exception can escape** are the queue constructor (memory allocation) and `T`'s constructor inside `Try*`.
+- The `Try*` operations provide the **strong** guarantee: if an exception is thrown, the queue remains in exactly the same state.
+- Everything `Pop*`, `Commit*`, `Front*` do is `noexcept`.
 
-## Пример
+## Example
 
 ```cpp
 SPSCQueue<Message, 1024> q;
@@ -111,9 +111,9 @@ while (auto* m = q.FrontLazy()) {
 q.CommitRead();
 ```
 
-## Замечания по дизайну
+## Design notes
 
-- `touch = true` (по умолчанию) зануляет буфер через `memset`, чтобы сразу выделить страницы и избежать page fault на горячем пути.
-- Память под объекты выделяется аллокатором, но сами объекты конструируются через `std::construct_at` и разрушаются через `std::destroy_at` — аллокатор используется только как источник сырой памяти.
-- Деструктор очереди уничтожает всё, что осталось «в полёте» — как неопубликованное (`pending` у producer), так и неосвобождённое (`pending` у consumer).
-- `GetApproxSize()` сначала читает `read`, потом `write` — иначе при одновременном прогрессе потребителя разность может уйти в минус и обернуться в огромное число.
+- `touch = true` (the default) zeroes the buffer via `memset` to fault in pages immediately and avoid page faults on the hot path.
+- Memory for the objects is allocated by the allocator, but the objects themselves are constructed via `std::construct_at` and destroyed via `std::destroy_at` — the allocator is used only as a source of raw memory.
+- The queue destructor destroys everything still "in flight" — both unpublished (producer's `pending`) and unreleased (consumer's `pending`).
+- `GetApproxSize()` reads `read` first, then `write` — otherwise, with the consumer progressing concurrently, the difference could go negative and wrap around to a huge number.
